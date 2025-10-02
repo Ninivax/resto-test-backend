@@ -230,6 +230,21 @@ app.post("/api/finish", (req, res) => {
   }
 });
 
+// Ruta raíz - opcional (para evitar "Cannot GET /")
+app.get("/", (req, res) => {
+  res.type("text/html").send(`
+    <h1>✅ Resto Test Backend activo</h1>
+    <p>Servidor corriendo correctamente.</p>
+    <ul>
+      <li><a href="/health">/health</a> - Verificar estado</li>
+      <li>POST <code>/api/start-test</code> - Iniciar test</li>
+      <li>POST <code>/api/answer</code> - Enviar respuestas</li>
+      <li>POST <code>/api/finish</code> - Finalizar test</li>
+    </ul>
+  `);
+});
+
+
 // --- Arrancar servidor ---
 const port = process.env.PORT || 8080;
 app.listen(port, () => {

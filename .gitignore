@@ -1,5 +1,40 @@
+# 🗑️ Dependencias
 node_modules/
-.env
 npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# 🛠️ Archivos temporales
+*.log
+*.tmp
+*.temp
+*.swp
 .DS_Store
+
+# 📁 Entornos y variables sensibles
+.env
+.env.local
+.env.*.local
+
+# 🐳 Archivos Docker temporales
+docker-compose.override.yml
+
+# 🧪 Cobertura de tests
+coverage/
+*.lcov
+
+# 🧰 Builds y artefactos
 dist/
+build/
+.cache/
+.tmp/
+
+# ⚙️ Configuración del sistema / editor
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# 🔐 Otros archivos sensibles
+*.pem
+*.key
