@@ -6,7 +6,8 @@ import { extractMainTextFromUrl, extractMany } from "./lib/extract.js";
 import { generateQuestionBank } from "./lib/generate.js";
 
 const app = express();
-const NUM_QUESTIONS = Number(process.env.NUM_QUESTIONS || 10); // 👈 configurable por .env
+const NUM_QUESTIONS = Number(process.env.NUM_QUESTIONS || 10);
+const WEBHOOK_URL = process.env.WEBHOOK_URL || "";
 
 // --- CORS + JSON ---
 app.use(
@@ -31,14 +32,34 @@ const SOURCES = {
 const attempts = new Map();
 
 // --- Helpers ---
-const toLetter = (i) => String.fromCharCode(65 + i); // 0->A
+const toLetter = (i) => String.fromCharCode(65 + i);
 function letterToIndex(letter) {
   const L = String(letter || "").trim().toUpperCase();
   return { A: 0, B: 1, C: 2, D: 3 }[L] ?? -1;
 }
 
+// ✅ Helper para enviar POST JSON a Make
+async function postJSON(url, body, timeoutMs = 8000) {
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: ac.signal,
+    });
+    const text = await res.text().catch(() => "");
+    return { ok: res.ok, status: res.status, text };
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 // --- Salud ---
-app.get("/health", (req, res) => res.json({ ok: true, numQuestions: NUM_QUESTIONS }));
+app.get("/health", (req, res) =>
+  res.json({ ok: true, numQuestions: NUM_QUESTIONS })
+);
 
 // --- START ---
 app.post("/api/start-test", async (req, res) => {
@@ -104,10 +125,7 @@ app.post("/api/start-test", async (req, res) => {
           questions?.length
         );
       }
-      console.log(
-        "[start-test] generación OK · preguntas:",
-        questions?.length
-      );
+      console.log("[start-test] generación OK · preguntas:", questions?.length);
     } catch (e) {
       console.error("[start-test] ERROR generando preguntas:", e);
       return res.status(500).json({
@@ -124,7 +142,7 @@ app.post("/api/start-test", async (req, res) => {
       urls,
       title,
       startedAt: new Date().toISOString(),
-      questions, // [{ id, prompt, options, correctIndex }]
+      questions,
       answers: [],
     });
 
@@ -140,7 +158,7 @@ app.post("/api/start-test", async (req, res) => {
       questions: questions.map((q) => ({
         id: q.id,
         prompt: q.prompt,
-        options: q.options, // A–D
+        options: q.options,
       })),
     });
   } catch (err) {
@@ -157,15 +175,16 @@ app.post("/api/answer", (req, res) => {
   try {
     const { attemptId, questionId, choice } = req.body || {};
     const attempt = attempts.get(attemptId);
-    if (!attempt) return res.status(404).json({ error: "Intento no encontrado" });
+    if (!attempt)
+      return res.status(404).json({ error: "Intento no encontrado" });
 
     const q = attempt.questions.find((x) => x.id === questionId);
     if (!q) return res.status(400).json({ error: "Pregunta inválida" });
 
     const idx = letterToIndex(choice);
-    if (idx < 0) return res.status(400).json({ error: "Responde con A, B, C o D." });
+    if (idx < 0)
+      return res.status(400).json({ error: "Responde con A, B, C o D." });
 
-    // Evitar duplicados
     const already = attempt.answers.find((a) => a.questionId === questionId);
     if (!already) {
       attempt.answers.push({
@@ -178,19 +197,25 @@ app.post("/api/answer", (req, res) => {
     return res.json({ ok: true });
   } catch (err) {
     console.error("[answer] ERROR:", err);
-    return res.status(500).json({ error: "Fallo al registrar la respuesta", detail: String(err?.message || err) });
+    return res.status(500).json({
+      error: "Fallo al registrar la respuesta",
+      detail: String(err?.message || err),
+    });
   }
 });
 
 // --- FINISH ---
-app.post("/api/finish", (req, res) => {
+app.post("/api/finish", async (req, res) => {
   try {
     const { attemptId } = req.body || {};
     const attempt = attempts.get(attemptId);
-    if (!attempt) return res.status(404).json({ error: "Intento no encontrado" });
+    if (!attempt)
+      return res.status(404).json({ error: "Intento no encontrado" });
 
     if (attempt.answers.length !== attempt.questions.length) {
-      return res.status(400).json({ error: "Aún faltan preguntas por responder" });
+      return res
+        .status(400)
+        .json({ error: "Aún faltan preguntas por responder" });
     }
 
     let score = 0;
@@ -198,13 +223,16 @@ app.post("/api/finish", (req, res) => {
       const ans = attempt.answers.find((a) => a.questionId === q.id);
       const selectedLetter = ans?.choiceLetter ?? "";
       const correctLetter = toLetter(q.correctIndex);
-      if (ans && ans.choiceIndex === q.correctIndex) score++;
+      const isCorrect = ans && ans.choiceIndex === q.correctIndex;
+      if (isCorrect) score++;
 
       return {
+        id: q.id,
         enunciado: q.prompt,
         opciones: q.options.map((opt, i) => `${toLetter(i)}) ${opt}`),
         respuestaSeleccionada: `${selectedLetter}) ${q.options[ans.choiceIndex]}`,
         respuestaCorrecta: `${correctLetter}) ${q.options[q.correctIndex]}`,
+        acierto: isCorrect,
       };
     });
 
@@ -216,22 +244,46 @@ app.post("/api/finish", (req, res) => {
       percent: `${percent}%`,
     };
 
+    const finishedAt = new Date().toISOString();
     const finalJson = {
       accion: "final",
       nombre: attempt.candidateName,
       dni: attempt.dni,
       puntuacion: `${score}/${total} (${percent}%)`,
+      score_numerico: score,
+      total_preguntas: total,
+      porcentaje: percent,
+      intentoId: attemptId,
+      fuente_titulo: attempt.title || "",
+      fuentes: attempt.urls || [],
+      startedAt: attempt.startedAt,
+      finishedAt,
       preguntas: outQuestions,
     };
+
+    // ✅ Enviar a webhook de Make (no bloquea la respuesta)
+    if (WEBHOOK_URL) {
+      postJSON(WEBHOOK_URL, finalJson)
+        .then((r) => {
+          if (!r.ok) console.error("[webhook] fallo:", r.status, r.text);
+          else console.log("[webhook] enviado OK");
+        })
+        .catch((e) => console.error("[webhook] error:", e));
+    } else {
+      console.warn("[webhook] WEBHOOK_URL no definido; no se envía a Make.");
+    }
 
     return res.json({ resultForStudent, finalJson });
   } catch (err) {
     console.error("[finish] ERROR:", err);
-    return res.status(500).json({ error: "Fallo al finalizar", detail: String(err?.message || err) });
+    return res.status(500).json({
+      error: "Fallo al finalizar",
+      detail: String(err?.message || err),
+    });
   }
 });
 
-// Ruta raíz - opcional (para evitar "Cannot GET /")
+// Ruta raíz - opcional
 app.get("/", (req, res) => {
   res.type("text/html").send(`
     <h1>✅ Resto Test Backend activo</h1>
