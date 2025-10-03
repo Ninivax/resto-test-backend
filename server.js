@@ -1,4 +1,3 @@
-
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
@@ -7,6 +6,7 @@ import { extractMainTextFromUrl, extractMany } from "./lib/extract.js";
 import { generateQuestionBank } from "./lib/generate.js";
 
 const app = express();
+const NUM_QUESTIONS = Number(process.env.NUM_QUESTIONS || 10); // 👈 configurable por .env
 
 // --- CORS + JSON ---
 app.use(
@@ -38,7 +38,7 @@ function letterToIndex(letter) {
 }
 
 // --- Salud ---
-app.get("/health", (req, res) => res.json({ ok: true }));
+app.get("/health", (req, res) => res.json({ ok: true, numQuestions: NUM_QUESTIONS }));
 
 // --- START ---
 app.post("/api/start-test", async (req, res) => {
@@ -98,9 +98,9 @@ app.post("/api/start-test", async (req, res) => {
     let questions;
     try {
       questions = await generateQuestionBank({ text, role: "" });
-      if (!Array.isArray(questions) || questions.length !== 5) {
+      if (!Array.isArray(questions) || questions.length !== NUM_QUESTIONS) {
         console.warn(
-          "[start-test] advertencia: se esperaban 5 preguntas, llegaron:",
+          `[start-test] advertencia: se esperaban ${NUM_QUESTIONS} preguntas, llegaron:`,
           questions?.length
         );
       }
@@ -136,6 +136,7 @@ app.post("/api/start-test", async (req, res) => {
     return res.json({
       attemptId,
       sourceTitle: title,
+      numQuestions: questions.length,
       questions: questions.map((q) => ({
         id: q.id,
         prompt: q.prompt,
@@ -235,6 +236,7 @@ app.get("/", (req, res) => {
   res.type("text/html").send(`
     <h1>✅ Resto Test Backend activo</h1>
     <p>Servidor corriendo correctamente.</p>
+    <p><strong>NUM_QUESTIONS:</strong> ${NUM_QUESTIONS}</p>
     <ul>
       <li><a href="/health">/health</a> - Verificar estado</li>
       <li>POST <code>/api/start-test</code> - Iniciar test</li>
@@ -243,7 +245,6 @@ app.get("/", (req, res) => {
     </ul>
   `);
 });
-
 
 // --- Arrancar servidor ---
 const port = process.env.PORT || 8080;
