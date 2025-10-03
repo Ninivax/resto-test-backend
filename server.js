@@ -2,12 +2,12 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import crypto from "crypto";
-import { extractMainTextFromUrl, extractMany } from "./lib/extract.js";
+import { extractMainTextFromUrl } from "./lib/extract.js";
 import { generateQuestionBank } from "./lib/generate.js";
 
 const app = express();
 const NUM_QUESTIONS = Number(process.env.NUM_QUESTIONS || 10);
-const WEBHOOK_URL = process.env.WEBHOOK_URL || "";
+const WEBHOOK_URL = (process.env.WEBHOOK_URL || "").trim();
 
 // --- CORS + JSON ---
 app.use(
@@ -59,22 +59,37 @@ function allocateCounts(total) {
   return out;
 }
 
-// Helper POST JSON (para Make)
-async function postJSON(url, body, timeoutMs = 8000) {
+// --- fetch fallback (por si el runtime no trae global.fetch) ---
+async function getFetch() {
+  if (typeof fetch === "function") return fetch;
+  const nf = (await import("node-fetch")).default;
+  return nf;
+}
+
+// Helper POST JSON (para Make) con logs
+async function postJSON(url, body, timeoutMs = 12000) {
+  const f = await getFetch();
   const ac = new AbortController();
   const t = setTimeout(() => ac.abort(), timeoutMs);
+
+  let res, text;
   try {
-    const res = await fetch(url, {
+    res = await f(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
       signal: ac.signal,
     });
-    const text = await res.text().catch(() => "");
-    return { ok: res.ok, status: res.status, text };
-  } finally {
+    text = await res.text().catch(() => "");
+  } catch (err) {
     clearTimeout(t);
+    const msg = err?.message || String(err);
+    console.error("[webhook] network error:", msg);
+    return { ok: false, status: 0, text: msg };
   }
+
+  clearTimeout(t);
+  return { ok: res.ok, status: res.status, text };
 }
 
 // --- Salud ---
@@ -101,7 +116,7 @@ app.post("/api/start-test", async (req, res) => {
         .json({ error: "Debes escribir exactamente: Realizar Test" });
     }
 
-    // Si piden una sola fuente, mantenemos compatibilidad: generamos solo de esa
+    // Si piden una sola fuente, generamos solo de esa
     if (["procedimiento", "maridaje", "recetario"].includes(source)) {
       const url = SOURCES[source];
       console.log("[start-test] fuente única:", source, url);
@@ -187,7 +202,7 @@ app.post("/api/start-test", async (req, res) => {
         titles[key] = title;
         texts[key] = text;
         console.log(`[start-test] ${key} extracción OK · chars:`, (text && text.length) || 0);
-        if (!text || text.trim().length < 200) {
+        if (!text || !String(text).trim() || String(text).trim().length < 200) {
           throw new Error(`Texto extraído insuficiente en ${key} (menos de 200 caracteres)`);
         }
       }
@@ -321,13 +336,12 @@ app.post("/api/finish", async (req, res) => {
 
       return {
         id: q.id,
-        fuente: q.source, // 👈 añadimos la fuente de origen
+        fuente: q.source,
         enunciado: q.prompt,
         opciones: q.options.map((opt, i) => `${toLetter(i)}) ${opt}`),
-        // 👇 Arreglo: ya no duplicamos la letra; solo texto de la opción
+        // Mostrar solo el texto (sin duplicar letra)
         respuestaSeleccionada: q.options[ans.choiceIndex],
         respuestaCorrecta: q.options[q.correctIndex],
-        // Letras separadas (útil si guardas en Excel)
         letraSeleccionada: selectedLetter,
         letraCorrecta: correctLetter,
         acierto: isCorrect,
@@ -359,22 +373,44 @@ app.post("/api/finish", async (req, res) => {
       preguntas: outQuestions,
     };
 
-    // Enviar a webhook de Make (no bloqueamos la respuesta al alumno)
+    // Enviar a webhook de Make y esperar la respuesta para diagnosticar
+    let webhookResult = { ok: false, status: 0, text: "disabled" };
     if (WEBHOOK_URL) {
-      postJSON(WEBHOOK_URL, finalJson)
-        .then((r) => {
-          if (!r.ok) console.error("[webhook] fallo:", r.status, r.text);
-          else console.log("[webhook] enviado OK");
-        })
-        .catch((e) => console.error("[webhook] error:", e));
+      webhookResult = await postJSON(WEBHOOK_URL, finalJson).catch((e) => {
+        console.error("[webhook] error:", e);
+        return { ok: false, status: 0, text: String(e?.message || e) };
+      });
+
+      if (!webhookResult.ok) {
+        console.error("[webhook] FAIL", webhookResult.status, webhookResult.text?.slice(0, 500));
+      } else {
+        console.log("[webhook] OK", webhookResult.status);
+      }
     } else {
       console.warn("[webhook] WEBHOOK_URL no definido; no se envía a Make.");
     }
 
-    return res.json({ resultForStudent, finalJson });
+    return res.json({ resultForStudent, finalJson, webhook: webhookResult });
   } catch (err) {
     console.error("[finish] ERROR:", err);
     return res.status(500).json({ error: "Fallo al finalizar", detail: String(err?.message || err) });
+  }
+});
+
+// --- Endpoint de prueba de webhook ---
+app.post("/api/test-webhook", async (req, res) => {
+  try {
+    if (!WEBHOOK_URL) return res.status(400).json({ error: "WEBHOOK_URL no definido" });
+    const payload = {
+      accion: "prueba",
+      now: new Date().toISOString(),
+      echo: req.body || {},
+    };
+    const r = await postJSON(WEBHOOK_URL, payload);
+    return res.json({ sentTo: WEBHOOK_URL, result: r, payload });
+  } catch (e) {
+    console.error("[/api/test-webhook] error:", e);
+    return res.status(500).json({ error: String(e?.message || e) });
   }
 });
 
@@ -389,6 +425,7 @@ app.get("/", (req, res) => {
       <li>POST <code>/api/start-test</code> - Iniciar test</li>
       <li>POST <code>/api/answer</code> - Enviar respuestas</li>
       <li>POST <code>/api/finish</code> - Finalizar test</li>
+      <li>POST <code>/api/test-webhook</code> - Probar webhook</li>
     </ul>
   `);
 });
@@ -398,5 +435,3 @@ const port = process.env.PORT || 8080;
 app.listen(port, () => {
   console.log(`✅ Servidor escuchando en http://localhost:${port}`);
 });
-
-
