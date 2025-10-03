@@ -59,6 +59,26 @@ function allocateCounts(total) {
   return out;
 }
 
+// --- Normalización para quitar “A) ”, “1.”, etc. del prompt y las opciones ---
+const LEADING_LABEL_RE = /^\s*(?:([A-Da-d])|([1-4]))[\)\.\-:]\s+|\s*^[A-Da-d]\)\s+|\s*^\d+\)\s+/;
+function stripLeadingLabel(str = "") {
+  let s = String(str).trim();
+  // elimina patrones comunes A) / a) / 1) / 1. / 1- :
+  s = s.replace(/^\s*([A-Da-d]|[1-4])[\)\.\-:]\s+/, "");
+  // si el modelo repite doble prefijo raro, limpiar otra vez
+  s = s.replace(/^\s*([A-Da-d]|[1-4])[\)\.\-:]\s+/, "");
+  return s.trim();
+}
+function normalizeQuestion(q) {
+  const opts = Array.isArray(q.options) ? q.options : [];
+  const cleanOpts = opts.map((o) => stripLeadingLabel(o));
+  return {
+    ...q,
+    prompt: stripLeadingLabel(q.prompt || ""),
+    options: cleanOpts,
+  };
+}
+
 // --- fetch fallback (por si el runtime no trae global.fetch) ---
 async function getFetch() {
   if (typeof fetch === "function") return fetch;
@@ -154,9 +174,9 @@ app.post("/api/start-test", async (req, res) => {
         });
       }
 
-      // Etiquetar con la fuente y garantizar IDs únicos
+      // Normalizar, etiquetar con la fuente y garantizar IDs únicos
       const tagged = bank.map((q) => ({
-        ...q,
+        ...normalizeQuestion(q),
         id: `${source}__${q.id}`,
         source,
       }));
@@ -214,12 +234,13 @@ app.post("/api/start-test", async (req, res) => {
       });
     }
 
-    // 2) Generar banco por cada fuente (cada llamada genera NUM_QUESTIONS, luego cortamos)
+    // 2) Generar banco por cada fuente
     let banks = {};
     try {
       for (const key of Object.keys(SOURCES)) {
         const bank = await generateQuestionBank({ text: texts[key], role: "" }); // devuelve NUM_QUESTIONS
-        banks[key] = bank;
+        // Normalizar cada pregunta del banco
+        banks[key] = bank.map((q) => normalizeQuestion(q));
         console.log(`[start-test] generación OK en ${key} · tamaño banco:`, bank?.length);
       }
     } catch (e) {
